@@ -1,0 +1,381 @@
+---
+title: "README"
+output: html_document
+date: "2026-10-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Exemplos de coleta de dados, construção de mapas e regressões de econometria espacial
+
+Pacotes
+
+```{r}
+library(lmtest)
+library(spdep)
+library(spatialreg)
+library(geobr)
+library(tidyverse)
+library(sidrar)
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(MASS)
+library(tseries)
+```
+
+
+Coletando dados do estado do Maranhão
+
+```{r}
+maranhao_mu=read_municipality(code_muni = 21)
+dataset_final=left_join(maranhao_mu,Base_Mapas_IRQV,by=c("code_muni"="code_muni"))
+```
+
+Obtendo matriz espacial
+```{r}
+read.gwt2nb()
+nb <- read.gwt2nb("matriz_vizinhanca.gal")
+ma.rook <- poly2nb(dataset_final$geom,queen = FALSE)
+```
+
+Tranformando a matriz em lista
+
+```{r}
+rook.listw <- nb2listw(ma.rook)
+moran.test(x = dataset_final$Fator_1, listw = rook.listw)
+```
+
+I de Moran local (LISA) para o IRQV, Renda per capita e para os 4 fatores
+
+LISA 2002
+
+```{r}
+
+locm<- localmoran(dataset_final$IQV_RELATIVO, listw = rook.listw)
+
+dataset_final$spib02 <- scale(dataset_final$Fator_1) %>% as.vector()
+dataset_final$lag_spib02 <- lag.listw(rook.listw, dataset_final$spib02)
+
+dataset_final$quad_sig <- NA
+dataset_final[(dataset_final$spib02 >= 0 & dataset_final$lag_spib02 >= 0) & (locm[, 5] <= 0.05), "quad_sig"] <- 1
+dataset_final[(dataset_final$spib02 <= 0 & dataset_final$lag_spib02 <= 0) & (locm[, 5] <= 0.05), "quad_sig"] <- 2
+dataset_final[(dataset_final$spib02 >= 0 & dataset_final$lag_spib02 <= 0) & (locm[, 5] <= 0.05), "quad_sig"] <- 3
+dataset_final[(dataset_final$spib02 <= 0 & dataset_final$lag_spib02 >= 0) & (locm[, 5] <= 0.05), "quad_sig"] <- 4
+dataset_final[(locm[, 5] >= 0.05), "quad_sig"] <- 5 
+
+#Mapeamento do LISA
+breaks <- seq(1, 5, 1)
+
+labels <- c("alto-alto", "baixo-baixo", "alto-baixo", "baixo-alto", "n?o signif.")
+
+np <- findInterval(dataset_final$quad_sig, breaks)
+
+#Estabelecendo cores para cada tipo de cluster
+
+colors <- c("red", "blue", "lightpink", "skyblue2", "white")
+colors <- c('#2510a3','#6e80e7','#aeb1f1','#e5e4fb',"white")
+plot(dataset_final$geom, col = colors[np])  #colors[np] coloca uma cor para cada munic?pio
+mtext("I de Moran local 2002", cex = 1.5, side = 3, line = 1)
+legend("topleft", legend = labels, fill = colors, bty = "n")
+library(writexl)
+write_xlsx(dataset_final,path = "dataset_final_FATOR_irqv_corrigido.xlsx")
+divi=dataset_final$Renda_percapita/100
+dataset_final$vizinhos
+card()
+
+```
+
+ Regressoes 
+
+ Modelo 1
+
+```{r}
+reg<-lm(log(dataset_final$Taxa_Bolsa)~log(dataset_final$IQV_RELATIVO))
+
+ Renda per capita
+
+reg<-lm(log(dataset_final$Renda_percapita)~dataset_final$Fator_1+
+                                           dataset_final$Fator_2+
+                                           dataset_final$Fator_3+
+                                           dataset_final$Fator_4)
+summary(reg)
+
+reg1<-lm(log(dataset_final$Renda_percapita)~dataset_final$Fator_1+
+          log(dataset_final$Fator_2)+
+          log(dataset_final$Fator_3)+
+          log(dataset_final$Fator_4))
+
+summary(reg1)
+```
+
+Gini
+
+```{r}
+
+reg2<-lm(dataset_final$gini~dataset_final$Fator_1+
+          dataset_final$Fator_2+
+          dataset_final$Fator_3+
+          dataset_final$Fator_4)
+
+summary(reg2)
+
+# Teste de normalidade
+
+sresid <- studres(reg2)
+jarque.bera.test(sresid)
+dataset_final$resi<-sresid
+```
+
+renda baixa
+
+```{r}
+reg3<-lm(log(dataset_final$pobres)~log(dataset_final$Fator_1)+
+           log(dataset_final$Fator_2)+
+           log(dataset_final$Fator_3)+
+           log(dataset_final$Fator_4))
+
+summary(reg3)
+
+
+iv_model<-ivreg(log(dataset_final$pobres)~log(dataset_final$Fator_1)+
+               log(dataset_final$Fator_2)+
+               log(dataset_final$Fator_3)+
+               log(dataset_final$Fator_4)|log(dataset_final$Renda_percapita))
+
+Hausman_test<-Hausman.test(reg3,iv_model)
+
+
+summary(iv_model)
+
+coef_diff <- coef(reg3) - coef(iv_model)
+cov_matrix <- vcov(iv_model)
+dw_hausman <- t(coef_diff) %*% solve(cov_matrix) %*% coef_diff
+
+
+# Teste de normalidade
+
+sresid <- studres(reg)
+jarque.bera.test(sresid)
+AIC(reg)
+BIC(reg)
+hist(reg3$residuals)
+
+# Teste de Heteroscedasticidade
+
+bptest(reg3) 
+
+# Testes de Dependencia Espacial
+
+lm.morantest(reg, listw = rook.listw) 
+
+lm.LMtests(reg, listw = rook.listw, test = "all")
+
+# Abordagem Espacial
+
+# Convergencia absoluta:
+
+reg_SAR<- lagsarlm(log(dataset_final$Taxa_FPM)~log(dataset_final$Fator_1)+
+                                        log(dataset_final$Fator_2)+
+                                        log(dataset_final$Fator_3)+
+                                         log(dataset_final$Fator_4),
+                                        listw = rook.listw)
+
+summary(reg_SAR)
+
+summary(reg3)
+summary(lm(log(dataset_final$IQV_RELATIVO~log(dataset_final$Taxa_FPM)))
+
+# Teste de normalidade nas var??veis
+
+shapiro.test(log(dataset_final$Renda_percapita))
+shapiro.test(log(dataset_final$Fator_1))
+shapiro.test(minmax)
+
+# Minimo e Maximo
+
+f_minmax <- function(x){
+  return((x - min(x))/(max(x)-min(x)))
+}
+
+minmax_renda <- f_minmax(dataset_final$Renda_percapita)
+minmax_Fator_1<- f_minmax(dataset_final$Fator_1)
+minmax_Fator_2<- f_minmax(dataset_final$Fator_2)
+minmax_Fator_3<- f_minmax(dataset_final$Fator_3)
+minmax_Fator_4<- f_minmax(dataset_final$Fator_4)
+minmax_pobres<-f_minmax(dataset_final$pobres)
+minmax_T_BANAGUA<-f_minmax(dataset_final$T_BANAGUA)
+minmax_T_BANAGUA<-f_minmax(dataset_final$ESPVIDA)
+
+# Log K
+
+f_log <- function(x){
+  k <- log10(abs(max(x)))
+  return(x/(10^k))
+}
+
+amp_renda<- f_log(dataset_final$Renda_percapita)
+amp_Fator_1<- f_log(dataset_final$Fator_1)
+amp_Fator_2<- f_log(dataset_final$Fator_2)
+amp_Fator_3<- f_log(dataset_final$Fator_3)
+amp_Fator_4<- f_log(dataset_final$Fator_4)
+amp_pobres<- f_log(dataset_final$pobres)
+amp_T_BANAGUA<- f_log(dataset_final$T_BANAGUA)
+amp_ESPVIDA<- f_log(dataset_final$ESPVIDA)
+
+hist(minmax)
+minm
+
+# Homicidios
+
+reg4<-lm(dataset_final$homicidios~dataset_final$Fator_1+
+           dataset_final$Fator_2+
+           dataset_final$Fator_3+
+           dataset_final$Fator_4)
+
+summary(reg4)
+
+# T_BANAGUA
+
+reg5<-lm(amp_T_BANAGUA~amp_Fator_1+
+           amp_Fator_2+
+           amp_Fator_3+
+           amp_Fator_4)
+
+summary(reg5)
+
+Teste de normalidade
+```
+
+```{r}
+sresid <- studres(reg5)
+jarque.bera.test(sresid)
+
+ Regressoes para diferentes grupos que representam o IDHM
+
+Esperanca de Vida
+
+```{r}
+reg<-lm(dataset_final$ESPVIDA~dataset_final$Fator_1+
+           dataset_final$Fator_2+
+           dataset_final$Fator_3+
+           dataset_final$Fator_4)
+
+summary(reg)
+```
+ 
+Teste de normalidade
+ 
+```{R}
+sresid <- studres(reg6)
+jarque.bera.test(sresid)
+
+map22= sacsarlm(Avg_CEa_15~1, listw= Wve)
+```
+
+```{R}
+
+reg1<-lm(dataset_final$gini~dataset_final$Fator_1+
+                            dataset_final$Fator_2+
+                            dataset_final$Fator_3+
+                            dataset_final$Fator_4)
+summary(reg1)
+
+```
+
+```{R}
+reg2<-lm(dataset_final$ESPVIDA ~ dataset_final$Fator_1+
+           dataset_final$Fator_2+
+           dataset_final$Fator_3+
+           dataset_final$Fator_4)
+
+summary(reg2)
+
+```
+
+
+```{r}
+reg3<-lm(Base_Mapas_IRQV$IQV_RELATIVO~Base_Mapas_IRQV$Fator_1+
+                                      Base_Mapas_IRQV$Fator_2+
+                                      Base_Mapas_IRQV$Fator_3+
+                                      Base_Mapas_IRQV$Fator_4)
+                                            
+
+summary(reg3)
+```
+
+ Teste de normalidade dos erros
+
+```{R}
+jarque.bera.test(reg)
+bptest(reg)
+shapiro.test(reg)
+
+bptest(reg)
+```
+
+SAR
+
+```{R}
+reg3 <- lagsarlm(log(dataset_final$pobres)~log(dataset_final$Fator_1)+
+                                      log(dataset_final$Fator_2)+
+                                      log(dataset_final$Fator_3)+
+                                      log(dataset_final$Fator_4),listw = rook.listw)
+summary(reg3)
+```
+
+SAC model
+
+````{R}
+reg4 <- sacsarlm(log(dataset_final$Taxa_FPM)~log(dataset_final$Fator_1)+
+                   log(dataset_final$Fator_2)+
+                   log(dataset_final$Fator_3)+
+                   log(dataset_final$Fator_4),listw = rook.listw)
+
+
+summary(reg4)
+````
+
+SEM model
+
+```{R}
+reg5 <- errorsarlm(log(dataset_final$Taxa_FPM)~log(dataset_final$Fator_1)+
+                   log(dataset_final$Fator_2)+
+                   log(dataset_final$Fator_3)+
+                   log(dataset_final$Fator_4),listw = rook.listw)
+
+
+summary(reg5)
+```
+
+SDEM Spatial Durbin Error Model "Modelo escolhido "
+
+```{R}
+reg6<- errorsarlm(log(dataset_final$Taxa_FPM)~log(dataset_final$Fator_1)+
+                     log(dataset_final$Fator_2)+
+                     log(dataset_final$Fator_3)+
+                     log(dataset_final$Fator_4),listw = rook.listw,
+                     etype = "emixed")
+
+summary(reg6)
+```
+
+Pseudo-R^2
+
+```{R}
+1-(reg6$SSE/(var(log(dataset_final$pobres))*(length(log(dataset_final$pobres))-1)))
+```
+
+SDM Spatial Durbin  Model
+
+```{R}
+reg7<- lagsarlm(log(dataset_final$Taxa_FPM)~log(dataset_final$Fator_1)+
+                    log(dataset_final$Fator_2)+
+                    log(dataset_final$Fator_3)+
+                    log(dataset_final$Fator_4),listw = rook.listw,
+                  type = "mixed")
+
+summary(reg7)
+```
